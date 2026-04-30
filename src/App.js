@@ -8,8 +8,10 @@ function App() {
   const [isBackendReady, setIsBackendReady] = useState(false);
   const [chunks, setChunks] = useState([]);
   const [finalBPM, setFinalBPM] = useState(null);
+  const [displayBPM, setDisplayBPM] = useState(0);
   const webcamRef = useRef(null);
 
+  // 1. Backend Health Check
   useEffect(() => {
     const checkServer = async () => {
       try {
@@ -27,11 +29,32 @@ function App() {
     checkServer();
   }, []);
 
-  const startAnalysis = async () => {
-    if (!isBackendReady) return;
+  // 2. SMART FINAL CALCULATION (Median Filter)
+  // This hook runs every time 'chunks' updates.
+  // When it hits 12, it calculates the most realistic result.
+  useEffect(() => {
+    if (chunks.length === 12) {
+      // Filter for chunks that aren't invalid and have a human BPM (45-120)
+      const validPoints = chunks
+        .filter((c) => !c.isInvalid && c.bpm > 45 && c.bpm < 130)
+        .map((c) => c.bpm);
 
+      if (validPoints.length > 0) {
+        // MEDIAN FILTER: Sort and pick the middle value to ignore spikes
+        validPoints.sort((a, b) => a - b);
+        const middleIndex = Math.floor(validPoints.length / 2);
+        const medianBPM = validPoints[middleIndex];
+        setFinalBPM(medianBPM.toFixed(1));
+      } else {
+        setFinalBPM("Inconclusive");
+      }
+    }
+  }, [chunks]);
+
+  const startAnalysis = async () => {
     setChunks([]);
     setFinalBPM(null);
+    setDisplayBPM(0);
     setStatus("Analyzing");
 
     let chunkCount = 0;
@@ -42,7 +65,6 @@ function App() {
         setStatus("Finished");
         return;
       }
-
       if (!webcamRef.current?.stream) return;
 
       const stream = webcamRef.current.stream;
@@ -56,7 +78,7 @@ function App() {
       setTimeout(() => {
         recorder.stopRecording(async () => {
           const blob = recorder.getBlob();
-          sendToBackend(blob, chunkCount + 1);
+          await sendToBackend(blob, chunkCount + 1);
           chunkCount++;
           captureLoop();
         });
@@ -76,20 +98,41 @@ function App() {
         body: formData,
       });
       const data = await response.json();
-      setChunks((prev) => [...prev, { id, ...data }]);
+
+      let isInvalid = data.quality < 0.1;
+      if (data.box && webcamRef.current) {
+        const videoEl = webcamRef.current.video;
+        const faceCenterX =
+          ((data.box.xmin + data.box.xmin_max) / 2) *
+          (videoEl.clientWidth / 128);
+        if (Math.abs(faceCenterX - videoEl.clientWidth / 2) > 250) {
+          isInvalid = true;
+        }
+      }
+
+      const chunkResult = { ...data, isInvalid };
+      setChunks((prev) => [...prev, { id, ...chunkResult }]);
+
+      if (!chunkResult.isInvalid) {
+        setDisplayBPM(data.bpm);
+      }
     } catch (error) {
       console.error("Inference Error:", error);
     }
   };
 
-  useEffect(() => {
-    if (chunks.length === 12) {
-      const avg = chunks.reduce((acc, c) => acc + c.bpm, 0) / 12;
-      setFinalBPM(avg.toFixed(2));
-    }
-  }, [chunks]);
-
   const latest = chunks.length > 0 ? chunks[chunks.length - 1] : null;
+
+  // IMPORTANT: All hooks are above this line.
+  if (!isBackendReady) {
+    return (
+      <div className="loader-container">
+        <div className="spinner"></div>
+        <h2>Initializing AI Models...</h2>
+        <p>Connecting to Python Backend Server</p>
+      </div>
+    );
+  }
 
   return (
     <div className="container">
@@ -97,47 +140,35 @@ function App() {
         <h1>
           rPPG <span className="highlight">Vital Monitor</span>
         </h1>
-        <p className="subtitle">
-          Remote Heart Rate Estimation via Computer Vision
-        </p>
+        <p className="subtitle">Stable Biometric Estimation</p>
       </header>
 
       <div className="main-layout">
-        <div className="webcam-container">
+        <div className="webcam-wrapper">
           <Webcam ref={webcamRef} mirrored muted className="webcam-feed" />
-
-          {/* Enhanced Status Overlays */}
-          {!isBackendReady && (
-            <div className="backend-loader">
-              <div className="spinner"></div>
-              <p>Waking up Backend & Loading Models...</p>
-            </div>
-          )}
-
-          {status === "Analyzing" && (
-            <div className="recording-status">
-              <span className="dot"></span> RECORDING CHUNK {chunks.length + 1}
-              /12
-            </div>
-          )}
+          <div className="camera-overlay"></div>
+          <div className="face-guideline"></div>
+          <div className={`overlay-text ${latest?.isInvalid ? "warning" : ""}`}>
+            {status === "Analyzing"
+              ? latest?.isInvalid
+                ? "Movement Detected - Stay Still"
+                : "Scanning Vitals..."
+              : status === "Finished"
+                ? "Scan Complete"
+                : "Align Face to Start"}
+          </div>
         </div>
 
         <div className="stats-grid">
-          {/* ... existing stats-grid code ... */}
           <div className="stat-card">
             <div className="stat-label">Heart Rate</div>
             <div className="stat-value">
-              {latest ? latest.bpm.toFixed(1) : "--"} <small>BPM</small>
-            </div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">Signal Quality</div>
-            <div className="stat-value">
-              {latest ? (latest.quality * 100).toFixed(0) : "--"}%
+              {displayBPM > 0 ? Math.round(displayBPM) : "--"}{" "}
+              <small>BPM</small>
             </div>
           </div>
           <div className="stat-card highlight-card">
-            <div className="stat-label">60s Average</div>
+            <div className="stat-label">Session Median</div>
             <div className="stat-value">{finalBPM || "--"}</div>
           </div>
         </div>
@@ -146,37 +177,37 @@ function App() {
       <div className="controls">
         <button
           onClick={startAnalysis}
-          className={`btn-primary ${!isBackendReady ? "disabled" : ""}`}
-          disabled={!isBackendReady || status === "Analyzing"}
+          className="btn-primary"
+          disabled={status === "Analyzing"}
         >
-          {!isBackendReady
-            ? "Connecting to Backend..."
-            : status === "Finished"
-              ? "Analyze Again"
-              : "Start Full Analysis"}
+          {status === "Analyzing"
+            ? `Progress: ${chunks.length}/12`
+            : "Start 60s Scan"}
         </button>
       </div>
 
       <div className="log-section">
-        <h3>Session Logs</h3>
+        <h3>Analysis Log</h3>
         <div className="log-table">
           <div className="log-header">
             <span>CHUNK</span>
             <span>BPM</span>
-            <span>RESP. RATE</span>
+            <span>RESP.</span>
             <span>LATENCY</span>
-            <span>SIGNAL</span>
+            <span>STATUS</span>
           </div>
           {chunks.map((c) => (
             <div key={c.id} className="log-row">
               <span>#{c.id}</span>
-              <span>{c.bpm.toFixed(2)}</span>
-              <span>{c.rr.toFixed(1)}</span>
+              <span>{c.isInvalid ? "--" : c.bpm.toFixed(1)}</span>
+              <span>
+                {c.isInvalid || c.rr > 25 || c.rr === 0
+                  ? "--"
+                  : c.rr.toFixed(1)}
+              </span>
               <span>{c.latency}</span>
-              <span
-                className={c.quality > 0.4 ? "quality-good" : "quality-low"}
-              >
-                {c.quality > 0.4 ? "Stable" : "Weak"}
+              <span className={c.isInvalid ? "quality-low" : "quality-good"}>
+                {c.isInvalid ? "Invalid" : "Stable"}
               </span>
             </div>
           ))}
