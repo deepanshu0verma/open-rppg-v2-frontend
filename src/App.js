@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import Webcam from "react-webcam";
 import RecordRTC from "recordrtc";
 import "./App.css";
@@ -7,16 +7,23 @@ function App() {
   const [status, setStatus] = useState("Initializing");
   const [isBackendReady, setIsBackendReady] = useState(false);
   const [chunks, setChunks] = useState([]);
-  const [finalBPM, setFinalBPM] = useState(null);
-  const webcamRef = useRef(null);
 
+  // Real-time states for the client's requirements
+  const [aggregateBPM, setAggregateBPM] = useState("--");
+  const [currentBPM, setCurrentBPM] = useState("--");
+
+  const isRecordingRef = useRef(false);
+  const webcamRef = useRef(null);
+  const recorderRef = useRef(null);
+
+  // Connection Guard
   useEffect(() => {
     const checkServer = async () => {
       try {
         const response = await fetch("http://localhost:8000/api/health");
         if (response.ok) {
           setIsBackendReady(true);
-          setStatus("Ready");
+          setStatus("System Ready");
         } else {
           setTimeout(checkServer, 2000);
         }
@@ -27,159 +34,182 @@ function App() {
     checkServer();
   }, []);
 
-  const startAnalysis = async () => {
-    if (!isBackendReady) return;
+  const stopAnalysis = useCallback(() => {
+    isRecordingRef.current = false;
+    if (recorderRef.current) recorderRef.current.stopRecording();
+    setStatus("Stopped");
+  }, []);
 
+  const resetAnalysis = () => {
+    stopAnalysis();
     setChunks([]);
-    setFinalBPM(null);
-    setStatus("Analyzing");
+    setAggregateBPM("--");
+    setCurrentBPM("--");
+    setStatus("System Ready");
+  };
+
+  const startAnalysis = async () => {
+    if (!isBackendReady || isRecordingRef.current) return;
+
+    resetAnalysis();
+    setStatus("Analyzing...");
+    isRecordingRef.current = true;
 
     let chunkCount = 0;
-    const maxChunks = 12;
-
     const captureLoop = async () => {
-      if (chunkCount >= maxChunks) {
-        setStatus("Finished");
+      if (chunkCount >= 12 || !isRecordingRef.current) {
+        if (chunkCount >= 12) setStatus("Session Complete");
+        isRecordingRef.current = false;
         return;
       }
 
-      if (!webcamRef.current?.stream) return;
+      const stream = webcamRef.current?.stream;
+      if (!stream) return;
 
-      const stream = webcamRef.current.stream;
-      const recorder = new RecordRTC(stream, {
+      recorderRef.current = new RecordRTC(stream, {
         type: "video",
         mimeType: "video/webm",
       });
-
-      recorder.startRecording();
+      recorderRef.current.startRecording();
 
       setTimeout(() => {
-        recorder.stopRecording(async () => {
-          const blob = recorder.getBlob();
-          sendToBackend(blob, chunkCount + 1);
+        if (!isRecordingRef.current) return;
+        recorderRef.current.stopRecording(async () => {
+          const blob = recorderRef.current.getBlob();
+          await sendToBackend(blob, chunkCount + 1);
           chunkCount++;
           captureLoop();
         });
-      }, 5000);
+      }, 5000); // 5-second chunk windows
     };
-
     captureLoop();
   };
 
   const sendToBackend = async (blob, id) => {
     const formData = new FormData();
     formData.append("video", blob, `chunk_${id}.webm`);
-
     try {
       const response = await fetch("http://localhost:8000/api/analyze", {
         method: "POST",
         body: formData,
       });
       const data = await response.json();
+
+      // Extract metrics returned from backend
       setChunks((prev) => [...prev, { id, ...data }]);
-    } catch (error) {
-      console.error("Inference Error:", error);
+      setCurrentBPM(data.chunk_bpm > 0 ? data.chunk_bpm : "--");
+      setAggregateBPM(data.aggregate_bpm > 0 ? data.aggregate_bpm : "--");
+    } catch (e) {
+      console.error("Inference Error:", e);
     }
   };
 
-  useEffect(() => {
-    if (chunks.length === 12) {
-      const avg = chunks.reduce((acc, c) => acc + c.bpm, 0) / 12;
-      setFinalBPM(avg.toFixed(2));
-    }
-  }, [chunks]);
-
-  const latest = chunks.length > 0 ? chunks[chunks.length - 1] : null;
+  if (!isBackendReady) {
+    return (
+      <div className="loader-screen">
+        <div className="pulse-loader"></div>
+        <h1>RPPG PROTOTYPE</h1>
+        <p>Connecting to AI Pipeline...</p>
+      </div>
+    );
+  }
 
   return (
-    <div className="container">
-      <header>
-        <h1>
-          rPPG <span className="highlight">Vital Monitor</span>
-        </h1>
-        <p className="subtitle">
-          Remote Heart Rate Estimation via Computer Vision
-        </p>
-      </header>
-
-      <div className="main-layout">
-        <div className="webcam-container">
-          <Webcam ref={webcamRef} mirrored muted className="webcam-feed" />
-
-          {/* Enhanced Status Overlays */}
-          {!isBackendReady && (
-            <div className="backend-loader">
-              <div className="spinner"></div>
-              <p>Waking up Backend & Loading Models...</p>
-            </div>
-          )}
-
-          {status === "Analyzing" && (
-            <div className="recording-status">
-              <span className="dot"></span> RECORDING CHUNK {chunks.length + 1}
-              /12
-            </div>
-          )}
+    <div className="dashboard-container">
+      <div className="top-nav">
+        <div className="brand">
+          RPPG<span>PROTOTYPE</span>
         </div>
-
-        <div className="stats-grid">
-          {/* ... existing stats-grid code ... */}
-          <div className="stat-card">
-            <div className="stat-label">Heart Rate</div>
-            <div className="stat-value">
-              {latest ? latest.bpm.toFixed(1) : "--"} <small>BPM</small>
-            </div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">Signal Quality</div>
-            <div className="stat-value">
-              {latest ? (latest.quality * 100).toFixed(0) : "--"}%
-            </div>
-          </div>
-          <div className="stat-card highlight-card">
-            <div className="stat-label">60s Average</div>
-            <div className="stat-value">{finalBPM || "--"}</div>
-          </div>
-        </div>
-      </div>
-
-      <div className="controls">
-        <button
-          onClick={startAnalysis}
-          className={`btn-primary ${!isBackendReady ? "disabled" : ""}`}
-          disabled={!isBackendReady || status === "Analyzing"}
+        <div
+          className={`status-tag ${status.includes("Ready") || status.includes("Complete") ? "ready" : "active"}`}
         >
-          {!isBackendReady
-            ? "Connecting to Backend..."
-            : status === "Finished"
-              ? "Analyze Again"
-              : "Start Full Analysis"}
-        </button>
+          {status}
+        </div>
       </div>
 
-      <div className="log-section">
-        <h3>Session Logs</h3>
-        <div className="log-table">
-          <div className="log-header">
-            <span>CHUNK</span>
-            <span>BPM</span>
-            <span>RESP. RATE</span>
-            <span>LATENCY</span>
-            <span>SIGNAL</span>
-          </div>
-          {chunks.map((c) => (
-            <div key={c.id} className="log-row">
-              <span>#{c.id}</span>
-              <span>{c.bpm.toFixed(2)}</span>
-              <span>{c.rr.toFixed(1)}</span>
-              <span>{c.latency}</span>
-              <span
-                className={c.quality > 0.4 ? "quality-good" : "quality-low"}
-              >
-                {c.quality > 0.4 ? "Stable" : "Weak"}
-              </span>
+      <div className="dashboard-grid">
+        {/* Left: Camera Feed */}
+        <div className="viewport-section">
+          <div className="webcam-wrapper">
+            <Webcam ref={webcamRef} mirrored muted className="video-surface" />
+            <div className="scanline"></div>
+            <div className="overlay-instruction">
+              {status === "Analyzing..."
+                ? "CAPTURING 5S CHUNKS..."
+                : "ALIGN FACE TO START"}
             </div>
-          ))}
+          </div>
+
+          <div className="control-center">
+            {status === "Analyzing..." ? (
+              <button onClick={stopAnalysis} className="btn stop">
+                STOP SCAN
+              </button>
+            ) : (
+              <button
+                onClick={startAnalysis}
+                className="btn start"
+                disabled={!isBackendReady}
+              >
+                START 60s SCAN
+              </button>
+            )}
+            <button onClick={resetAnalysis} className="btn reset">
+              RESET
+            </button>
+          </div>
+        </div>
+
+        {/* Right: Real-time Data Metrics */}
+        <div className="metrics-section">
+          {/* Top Aggregate Cards */}
+          <div className="cards-row">
+            <div className="metric-card">
+              <div className="label">Current Chunk (5s)</div>
+              <div className="value-group">
+                <span className="big-value">{currentBPM}</span>
+                <span className="unit">BPM</span>
+              </div>
+            </div>
+            <div className="metric-card active-card">
+              <div className="label">Overall Aggregate (60s)</div>
+              <div className="value-group">
+                <span className="big-value highlight">{aggregateBPM}</span>
+                <span className="unit">BPM</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Client Requirement: Data Log Table */}
+          <div className="mini-log">
+            <div className="log-header">
+              <span className="col-id">ID</span>
+              <span className="col-bpm">CHUNK BPM</span>
+              <span className="col-rr">RR</span>
+              <span className="col-lat">LATENCY</span>
+              <span className="col-qual">QUALITY</span>
+            </div>
+            <div className="log-scroll">
+              {chunks.length === 0 && (
+                <div className="empty-log">Awaiting pipeline data...</div>
+              )}
+              {chunks.map((c) => (
+                <div key={c.id} className="log-entry">
+                  <span className="col-id">#{c.id}</span>
+                  <span className="col-bpm">
+                    {c.chunk_bpm > 0 ? c.chunk_bpm : "---"}
+                  </span>
+                  <span className="col-rr">{c.rr > 0 ? c.rr : "---"}</span>
+                  <span className="col-lat">{c.latency}</span>
+                  <span
+                    className={`col-qual ${c.quality > 50 ? "good" : "bad"}`}
+                  >
+                    {c.quality}%
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     </div>
