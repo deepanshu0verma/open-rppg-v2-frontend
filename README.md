@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://res.cloudinary.com/damecjgp9/image/upload/v1778580064/Screenshot_2026-05-12_at_2.17.15_PM_s6inja.png" width="600" alt="Project Screenshot" />
+</p>
+
 # Getting Started with Create React App
 
 This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
